@@ -40,35 +40,49 @@ function createStreamFnWithExtraParams(
   extraParams: Record<string, unknown> | undefined,
   provider: string,
   modelId: string,
+  sessionKey?: string,
 ): StreamFn | undefined {
-  if (!extraParams || Object.keys(extraParams).length === 0) {
-    return undefined;
-  }
-
   const streamParams: Partial<SimpleStreamOptions> & { cacheControlTtl?: CacheControlTtl } = {};
-  if (typeof extraParams.temperature === "number") {
-    streamParams.temperature = extraParams.temperature;
-  }
-  if (typeof extraParams.maxTokens === "number") {
-    streamParams.maxTokens = extraParams.maxTokens;
-  }
-  const cacheControlTtl = resolveCacheControlTtl(extraParams, provider, modelId);
-  if (cacheControlTtl) {
-    streamParams.cacheControlTtl = cacheControlTtl;
+  if (extraParams) {
+    if (typeof extraParams.temperature === "number") {
+      streamParams.temperature = extraParams.temperature;
+    }
+    if (typeof extraParams.maxTokens === "number") {
+      streamParams.maxTokens = extraParams.maxTokens;
+    }
+    const cacheControlTtl = resolveCacheControlTtl(extraParams, provider, modelId);
+    if (cacheControlTtl) {
+      streamParams.cacheControlTtl = cacheControlTtl;
+    }
   }
 
-  if (Object.keys(streamParams).length === 0) {
+  const hasSessionKeyHeader = typeof sessionKey === "string" && sessionKey.trim().length > 0;
+  if (Object.keys(streamParams).length === 0 && !hasSessionKeyHeader) {
     return undefined;
   }
 
-  log.debug(`creating streamFn wrapper with params: ${JSON.stringify(streamParams)}`);
+  if (Object.keys(streamParams).length > 0) {
+    log.debug(`creating streamFn wrapper with params: ${JSON.stringify(streamParams)}`);
+  }
 
   const underlying = baseStreamFn ?? streamSimple;
-  const wrappedStreamFn: StreamFn = (model, context, options) =>
-    underlying(model as Model<Api>, context, {
+  const wrappedStreamFn: StreamFn = (model, context, options) => {
+    const existingHeaders =
+      options?.headers != null &&
+      typeof options.headers === "object" &&
+      !Array.isArray(options.headers)
+        ? (options.headers as Record<string, string>)
+        : {};
+    const mergedHeaders: Record<string, string> = { ...existingHeaders };
+    if (hasSessionKeyHeader && sessionKey) {
+      mergedHeaders["X-Moltbot-Session-Key"] = String(sessionKey);
+    }
+    return underlying(model as Model<Api>, context, {
       ...streamParams,
       ...options,
+      ...(Object.keys(mergedHeaders).length > 0 ? { headers: mergedHeaders } : {}),
     });
+  };
 
   return wrappedStreamFn;
 }
@@ -84,6 +98,7 @@ export function applyExtraParamsToAgent(
   provider: string,
   modelId: string,
   extraParamsOverride?: Record<string, unknown>,
+  sessionKey?: string,
 ): void {
   const extraParams = resolveExtraParams({
     cfg,
@@ -97,7 +112,13 @@ export function applyExtraParamsToAgent(
         )
       : undefined;
   const merged = Object.assign({}, extraParams, override);
-  const wrappedStreamFn = createStreamFnWithExtraParams(agent.streamFn, merged, provider, modelId);
+  const wrappedStreamFn = createStreamFnWithExtraParams(
+    agent.streamFn,
+    merged,
+    provider,
+    modelId,
+    sessionKey,
+  );
 
   if (wrappedStreamFn) {
     log.debug(`applying extraParams to agent streamFn for ${provider}/${modelId}`);
